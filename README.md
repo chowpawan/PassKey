@@ -1,196 +1,97 @@
 # PassKey
 
-A small password manager that unlocks with a WebAuthn passkey (Touch ID, Face ID,
-Windows Hello, or a security key) instead of a master password.
+[![Live demo](https://img.shields.io/badge/live%20demo-pass--key--self.vercel.app-2ea44f?logo=vercel&logoColor=white)](https://pass-key-self.vercel.app)
 
-Built as a learning project to explore two pieces of tech end-to-end:
+A tiny password vault that you unlock with a passkey instead of a master password.
 
-1. **WebAuthn / FIDO2** — the browser API behind "Sign in with passkey"
-2. **Encrypted vault storage** — AES-GCM on top of SQLite
+I built this to figure out how WebAuthn actually works. Reading the spec is one thing — getting Touch ID to talk to a FastAPI server and have everything line up is another. The pun is intentional: your *passkey* unlocks your *pass*words.
 
-Stack: **FastAPI** (Python 3.11+), **React + TypeScript** (Vite), **SQLite**.
+Live at https://pass-key-self.vercel.app if you just want to poke at it. Fair warning: the Render free tier sleeps the backend after 15 minutes of no traffic, so the first request after a quiet stretch takes ~30 seconds while it boots back up.
 
----
+## What's in it
 
-## Running locally
+- FastAPI + SQLAlchemy (async) on the backend
+- React + TypeScript + Vite on the frontend
+- SQLite locally, Postgres in production
+- `py_webauthn` for the server-side ceremony, `@simplewebauthn/browser` for the client
+- AES-GCM for the actual password encryption
 
-You need Python ≥ 3.11, Node ≥ 18, and a device with a platform authenticator
-(macOS / iOS / Windows Hello / Android) or a USB security key.
+## Running it locally
 
-### Backend
+You need Python 3.11+, Node 18+, and a device with some kind of authenticator (Mac Touch ID, Windows Hello, a phone, or a USB security key — anything the OS recognises as a passkey provider works).
 
-```bash
+Backend:
+
+```
 cd backend
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"
-
+pip install -e .
 cp .env.example .env
-# fill VAULT_KEY  (openssl rand -base64 32)
-# fill SESSION_SECRET  (openssl rand -hex 32)
-
+# the .env file has the openssl one-liners for VAULT_KEY and SESSION_SECRET
 uvicorn app.main:app --reload --port 8000
 ```
 
-### Frontend
+Frontend, in another terminal:
 
-In another terminal:
-
-```bash
+```
 cd frontend
 npm install
-npm run dev          # http://localhost:5173
+npm run dev
 ```
 
-The Vite dev server proxies `/api` → `http://localhost:8000` so the browser sees
-one origin (important — WebAuthn binds credentials to the origin and RP ID).
+Open http://localhost:5173, pick a username, and your OS will pop the passkey prompt. After that you're in the vault.
 
----
+Tests:
 
-## Manual verification
-
-The WebAuthn ceremony can only be exercised end-to-end with a real
-authenticator, so the happy path is a manual test:
-
-1. Open `http://localhost:5173/register`, type a username, click
-   **Create passkey** → your OS prompts for Touch ID / Face ID / etc.
-2. You should land on `/vault`.
-3. Add a vault entry (e.g. `github.com / alice / hunter2`) → it appears in the list.
-4. Click **Sign out** to clear the session cookie.
-5. Go to `/login`, enter the same username, authenticate → you're back at the vault
-   and the entry persists.
-6. Reload the page — entry still there.
-7. Delete the entry → gone after refresh.
-
-### Automated tests
-
-Server-side smoke tests (vault CRUD + session handling) bypass the WebAuthn
-ceremony by inserting a User + Session row directly, since `navigator.credentials`
-can't run inside pytest:
-
-```bash
+```
 cd backend && pytest
 ```
 
----
+The smoke tests don't drive the WebAuthn ceremony itself — there's no real authenticator inside pytest. They insert a user + session row directly and exercise the vault CRUD and signout paths, which is the part I actually wrote.
 
-## Project layout
-
-```
-PassKey/
-├── backend/
-│   ├── app/
-│   │   ├── main.py              # FastAPI app entry
-│   │   ├── config.py            # pydantic-settings
-│   │   ├── db.py                # SQLAlchemy async engine
-│   │   ├── models.py            # User, Credential, VaultEntry, Challenge, Session
-│   │   ├── schemas.py           # Pydantic request/response models
-│   │   ├── auth.py              # signed-cookie sessions + current_user dep
-│   │   ├── crypto.py            # AES-GCM wrapper
-│   │   ├── webauthn_helpers.py  # wraps py_webauthn
-│   │   └── routes/
-│   │       ├── webauthn.py      # /api/webauthn/{register,login}/{begin,complete}
-│   │       └── vault.py         # /api/vault GET/POST/DELETE + /whoami /signout
-│   └── tests/test_smoke.py
-└── frontend/
-    └── src/
-        ├── api.ts               # fetch wrappers
-        ├── webauthn.ts          # @simplewebauthn/browser glue
-        ├── App.tsx              # routing + auth bootstrap
-        ├── pages/{Register,Login,Vault}.tsx
-        └── components/VaultEntryForm.tsx
-```
-
----
-
-## Architecture notes
+## How the pieces fit
 
 ```
-┌───────────────────────┐    HTTPS (proxied)    ┌────────────────────────┐
-│  React + Vite (5173)  │ ─────────────────────►│  FastAPI (8000)        │
-│  @simplewebauthn/     │                       │  py_webauthn (verify)  │
-│   browser             │                       │  AES-GCM (cryptography)│
-│  vault UI             │ ◄─────────────────────│  signed-cookie session │
-└───────────────────────┘   HttpOnly cookie     └───────────┬────────────┘
-                                                            │ SQLAlchemy
-                                                            ▼
-                                                ┌──────────────────────┐
-                                                │  SQLite (passkey.db) │
-                                                └──────────────────────┘
+React (5173) ──fetch──►  FastAPI (8000) ──►  SQLite / Postgres
+              ◄────────  HttpOnly cookie
 ```
 
-- **RP ID** = `localhost`, **expected origin** = `http://localhost:5173`.
-- **WebAuthn challenges** are stored in the `challenges` table and consumed on
-  completion — single-use, 5-minute TTL.
-- **Sessions** are server-side rows; the cookie holds only a signed session ID
-  (using `itsdangerous`). Cookie is `HttpOnly`, `SameSite=Lax`, 24h TTL.
-- **Vault encryption (MVP):** AES-GCM with a server-held key from `VAULT_KEY`.
-  Passwords are encrypted on insert and decrypted on read. The passkey controls
-  *access* via the session cookie; the encryption key sits server-side.
+Registration and login each have a `/begin` and `/complete` endpoint. `/begin` generates a WebAuthn challenge, stashes it in a `challenges` row with a 5-minute TTL, and returns the options blob the browser needs. The browser hands that to `navigator.credentials.create` (register) or `.get` (login), the authenticator does its thing, and the result comes back to `/complete`. The server verifies it via `py_webauthn` — for registration it stores the public key, for login it bumps the sign counter — and sets a signed HttpOnly session cookie. From then on the vault routes are gated on that cookie.
 
-### Known MVP simplifications (intentional)
+The vault is plain CRUD with one wrinkle: `POST /api/vault` AES-GCM-encrypts the password before saving, `GET /api/vault` decrypts on the way out. The key lives in the `VAULT_KEY` env var on the server. That's a deliberate shortcut — see below.
 
-| Today | Intended next step |
-|---|---|
-| Server-held vault key | WebAuthn **PRF extension** — the authenticator derives a per-user secret inside the secure enclave; server never sees plaintext keys. True end-to-end encryption. |
-| One passkey per user | Multi-device passkeys + a management UI to list/revoke |
-| Username field on login | Discoverable credentials / username-less login (`allowCredentials: []`) |
-| No recovery | Recovery codes or a second factor |
-| HTTP localhost only | HTTPS + proper RP ID for a public deployment |
+## What I cut
 
----
+The biggest one: the server holds the vault encryption key. That works, but it means anyone with server access can read every vault. The proper fix is the **WebAuthn PRF extension**, where the authenticator derives a per-user secret inside its secure enclave and the server never sees the plaintext key. That's the most interesting thing I'd add next and I left it for v2.
 
-## Deploying (Vercel + Render)
+The rest:
 
-The two halves go to different providers because WebAuthn + SQLite + a static
-SPA each prefer a different runtime.
+- one passkey per account; no UI to add a second device or revoke a lost one
+- no discoverable credentials, so you still type a username before authenticating
+- no recovery — if you lose the passkey, the vault is gone
+- the vault list endpoint decrypts every row server-side, which is fine for a demo but obviously not what you'd ship
 
-### 1. Push to GitHub (already done if you cloned this repo)
+## Deploying it yourself
 
-### 2. Backend → Render (Blueprint)
+Frontend on Vercel, backend on Render with a managed Postgres. The repo's `render.yaml` is a Render Blueprint, so the web service and the database get created together.
 
-1. In the Render dashboard: **New + → Blueprint** → select this repo.
-2. Render reads `render.yaml` in the repo root and proposes a `passkey-api`
-   web service + a free `passkey-db` Postgres database. Apply.
-3. The first deploy will fail health-check because `RP_ID` and
-   `EXPECTED_ORIGIN` are blank — they depend on the frontend URL, which
-   doesn't exist yet. Continue to step 3 and come back to fill them in.
-4. Note the backend URL Render assigns you (e.g.
-   `https://passkey-api.onrender.com`).
+The order matters because WebAuthn binds credentials to a specific domain:
 
-### 3. Frontend → Vercel
+1. **Render → New Blueprint** → pick this repo. It'll ask for `RP_ID` and `EXPECTED_ORIGIN` — leave both as placeholders (literally anything) for now, you can't know them yet. The first deploy will fail health checks. That's fine. Note the URL Render assigns the API.
+2. **Vercel → import this repo** → set root directory to `frontend` → add an env var `VITE_API_URL` pointing at the Render API URL. Deploy. Note the Vercel URL.
+3. **Back to Render** → set `RP_ID` to the Vercel hostname (no `https://`) and `EXPECTED_ORIGIN` to the full URL with `https://`. Redeploy.
 
-1. In Vercel: **Add New → Project** → import this repo.
-2. **Root directory:** `frontend`.
-3. Vercel auto-detects Vite. Leave build/output settings as-is
-   (`vercel.json` already specifies them).
-4. **Environment Variables** → add:
-   - `VITE_API_URL` = your Render backend URL from step 2.4 (no trailing slash).
-5. Deploy. Note the URL Vercel assigns (e.g.
-   `https://passkey-xyz.vercel.app`).
+A passkey you registered on `localhost` will not work on `*.vercel.app` and vice versa — the RP ID is part of the credential, so they live in separate namespaces. You re-register on each environment.
 
-### 4. Back to Render — fill in the WebAuthn vars
+If anything weird happens, it's almost always one of:
 
-In the Render `passkey-api` service → **Environment** → set:
+- `RP_ID` doesn't exactly match the frontend hostname
+- `EXPECTED_ORIGIN` has a trailing slash or is `http://` instead of `https://`
+- the browser is holding onto an old JS bundle (hard refresh: ⌘⇧R)
 
-| Key | Value |
-|---|---|
-| `RP_ID` | `passkey-xyz.vercel.app` *(hostname only, no scheme)* |
-| `EXPECTED_ORIGIN` | `https://passkey-xyz.vercel.app` |
+## Why bother
 
-Trigger a redeploy. Once it's healthy you can register a passkey from the
-Vercel URL.
+Mostly I wanted to stop hand-waving about WebAuthn. The material online tends to be either "install this npm package and you're done" or a 4000-word breakdown of CBOR encoding, with not a lot in between. Wiring up the full ceremony end-to-end was the only way I was going to actually understand what the browser, the authenticator, and the server each do during a registration or login.
 
-### Caveats
-
-- **WebAuthn credentials are domain-bound.** A passkey you registered on
-  `localhost` will not work on `*.vercel.app`, and vice versa. Each domain
-  needs its own registration.
-- **Render free tier sleeps after 15 min idle.** First request after sleep
-  takes ~30s. Upgrade or use Fly.io if you need always-on.
-- **Custom domain:** if you put both halves behind one domain
-  (`app.example.com` + `app.example.com/api/*` via a reverse proxy), you can
-  set `COOKIE_SAMESITE=lax` and `SECURE_COOKIES=true` and skip the
-  cross-origin cookie dance entirely.
-
----
+The vault on top is mostly so the passkey has something to *protect*. It'd feel weird to demo "log in with Touch ID!" and dump you on an empty page.
