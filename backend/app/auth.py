@@ -31,8 +31,8 @@ async def create_session(user_id: str, response: Response, db: AsyncSession) -> 
         token,
         max_age=settings.session_ttl_seconds,
         httponly=True,
-        samesite="lax",
-        secure=False,  # localhost dev; flip to True behind HTTPS
+        samesite=settings.cookie_samesite,
+        secure=settings.secure_cookies,
         path="/",
     )
     return row.id

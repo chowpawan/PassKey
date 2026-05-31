@@ -1,5 +1,9 @@
+// Local dev: empty string -> Vite proxy handles /api -> :8000.
+// Prod: set VITE_API_URL in Vercel env to the Render backend URL (no trailing slash).
+const API_BASE = import.meta.env.VITE_API_URL ?? "";
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
+  const res = await fetch(API_BASE + path, {
     credentials: "include",
     headers: { "Content-Type": "application/json", ...(init?.headers || {}) },
     ...init,

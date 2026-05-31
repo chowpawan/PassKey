@@ -14,8 +14,18 @@ class Base(DeclarativeBase):
     pass
 
 
+def _normalize_db_url(url: str) -> str:
+    # Render (and many hosted Postgres providers) hand out 'postgres://' URLs,
+    # but SQLAlchemy 2.x requires the explicit driver-qualified form.
+    if url.startswith("postgres://"):
+        url = "postgresql+asyncpg://" + url[len("postgres://"):]
+    elif url.startswith("postgresql://"):
+        url = "postgresql+asyncpg://" + url[len("postgresql://"):]
+    return url
+
+
 _settings = get_settings()
-engine = create_async_engine(_settings.db_url, echo=False, future=True)
+engine = create_async_engine(_normalize_db_url(_settings.db_url), echo=False, future=True)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 

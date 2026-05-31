@@ -140,6 +140,61 @@ PassKey/
 
 ---
 
+## Deploying (Vercel + Render)
+
+The two halves go to different providers because WebAuthn + SQLite + a static
+SPA each prefer a different runtime.
+
+### 1. Push to GitHub (already done if you cloned this repo)
+
+### 2. Backend → Render (Blueprint)
+
+1. In the Render dashboard: **New + → Blueprint** → select this repo.
+2. Render reads `render.yaml` in the repo root and proposes a `passkey-api`
+   web service + a free `passkey-db` Postgres database. Apply.
+3. The first deploy will fail health-check because `RP_ID` and
+   `EXPECTED_ORIGIN` are blank — they depend on the frontend URL, which
+   doesn't exist yet. Continue to step 3 and come back to fill them in.
+4. Note the backend URL Render assigns you (e.g.
+   `https://passkey-api.onrender.com`).
+
+### 3. Frontend → Vercel
+
+1. In Vercel: **Add New → Project** → import this repo.
+2. **Root directory:** `frontend`.
+3. Vercel auto-detects Vite. Leave build/output settings as-is
+   (`vercel.json` already specifies them).
+4. **Environment Variables** → add:
+   - `VITE_API_URL` = your Render backend URL from step 2.4 (no trailing slash).
+5. Deploy. Note the URL Vercel assigns (e.g.
+   `https://passkey-xyz.vercel.app`).
+
+### 4. Back to Render — fill in the WebAuthn vars
+
+In the Render `passkey-api` service → **Environment** → set:
+
+| Key | Value |
+|---|---|
+| `RP_ID` | `passkey-xyz.vercel.app` *(hostname only, no scheme)* |
+| `EXPECTED_ORIGIN` | `https://passkey-xyz.vercel.app` |
+
+Trigger a redeploy. Once it's healthy you can register a passkey from the
+Vercel URL.
+
+### Caveats
+
+- **WebAuthn credentials are domain-bound.** A passkey you registered on
+  `localhost` will not work on `*.vercel.app`, and vice versa. Each domain
+  needs its own registration.
+- **Render free tier sleeps after 15 min idle.** First request after sleep
+  takes ~30s. Upgrade or use Fly.io if you need always-on.
+- **Custom domain:** if you put both halves behind one domain
+  (`app.example.com` + `app.example.com/api/*` via a reverse proxy), you can
+  set `COOKIE_SAMESITE=lax` and `SECURE_COOKIES=true` and skip the
+  cross-origin cookie dance entirely.
+
+---
+
 ## License
 
 MIT (or whatever you prefer for a portfolio piece).
