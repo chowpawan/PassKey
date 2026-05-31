@@ -194,7 +194,3 @@ Vercel URL.
   cross-origin cookie dance entirely.
 
 ---
-
-## License
-
-MIT (or whatever you prefer for a portfolio piece).
