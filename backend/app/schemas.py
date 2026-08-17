@@ -23,6 +23,12 @@ class LoginCompleteRequest(BaseModel):
     assertion: dict[str, Any]
 
 
+class ReverifyCompleteRequest(BaseModel):
+    """Step-up assertion. No username — the session already says who's asking."""
+
+    assertion: dict[str, Any]
+
+
 class WhoAmIResponse(BaseModel):
     username: str
 

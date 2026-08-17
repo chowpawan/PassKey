@@ -48,7 +48,7 @@ Tests:
 cd backend && pytest
 ```
 
-The smoke tests don't drive the WebAuthn ceremony itself — there's no real authenticator inside pytest. They insert a user + session row directly and exercise the vault CRUD and signout paths, which is the part I actually wrote.
+The smoke tests don't drive the WebAuthn ceremony itself — there's no real authenticator inside pytest. They insert a user + session row directly and exercise the vault CRUD and signout paths, which is the part I actually wrote. The step-up tests work the same way: seeding a session with a backdated `last_verified_at` is enough to make the guard deny, so I can assert on the 403 *and* on the `access_log` row without a fingerprint anywhere.
 
 ## How the pieces fit
 
@@ -60,6 +60,16 @@ React (5173) ──fetch──►  FastAPI (8000) ──►  SQLite / Postgres
 Registration and login each have a `/begin` and `/complete` endpoint. `/begin` generates a WebAuthn challenge, stashes it in a `challenges` row with a 5-minute TTL, and returns the options blob the browser needs. The browser hands that to `navigator.credentials.create` (register) or `.get` (login), the authenticator does its thing, and the result comes back to `/complete`. The server verifies it via `py_webauthn` — for registration it stores the public key, for login it bumps the sign counter — and sets a signed HttpOnly session cookie. From then on the vault routes are gated on that cookie.
 
 The vault is plain CRUD with one wrinkle: `POST /api/vault` AES-GCM-encrypts the password before saving, `GET /api/vault` decrypts on the way out. The key lives in the `VAULT_KEY` env var on the server. That's a deliberate shortcut — see below.
+
+### Signed in ≠ verified
+
+The session cookie lasts 24 hours, which is fine for knowing *who* you are and terrible as permission to read every password you own. So the routes that touch `vault_entries` want a second thing: a passkey assertion from within the last `STEP_UP_TTL_SECONDS` (5 minutes by default). Sessions carry a `last_verified_at` alongside `expires_at`, and `app/authz.py` compares them.
+
+Allowed → the request reaches the vault route and touches `vault_entries`. Denied → 403 with `{"code": "reverification_required"}`, and the frontend swaps the entry list for an *Unlock with passkey* button. That runs `/api/webauthn/reverify/{begin,complete}`, which is an ordinary assertion except it refreshes the existing session instead of minting a new one — same cookie, same row, new clock.
+
+The part I care about is that deciding and recording are the same code path. The guard writes an `access_log` row — allow *and* deny, with the action, the decision, and how stale the session was — before it either returns or raises. There's no separate "oh and log the failure too" branch sitting next to the `raise`, because that's exactly the branch that rots the first time someone adds a route and forgets it.
+
+There's no migration tool here, so `init_db()` does a small additive-column pass after `create_all()`. `last_verified_at` has no default on purpose: a session row that predates the column reads `NULL`, and `NULL` means denied rather than fresh. Fail closed. (I had this backwards at first — the model default was quietly making never-verified sessions look brand new, and a test caught it.)
 
 ## What I cut
 

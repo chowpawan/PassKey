@@ -14,6 +14,11 @@ class Settings(BaseSettings):
     session_secret: str
     session_ttl_seconds: int = 86400
 
+    # A session stays signed in for session_ttl_seconds, but touching vault_entries
+    # additionally needs a passkey assertion this recent. Past it, the vault routes
+    # answer 403 until the user re-verifies.
+    step_up_ttl_seconds: int = 300
+
     # Cross-origin cookies for prod (frontend on Vercel, backend on Render).
     # Local dev: leave as defaults. Prod: SECURE_COOKIES=true, COOKIE_SAMESITE=none.
     secure_cookies: bool = False
