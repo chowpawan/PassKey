@@ -3,7 +3,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import COOKIE_NAME, Principal, current_user, destroy_session
-from app.authz import require_fresh_verification
+from app.authz import require_permission
 from app.crypto import decrypt, encrypt
 from app.db import get_session
 from app.models import User, VaultEntry
@@ -11,14 +11,14 @@ from app.schemas import VaultEntryCreate, VaultEntryOut, WhoAmIResponse
 
 router = APIRouter()
 
-# whoami and signout stay outside the step-up guard: the client needs to know who it
-# is (and be able to leave) without first proving freshness. Everything below that
-# reads or writes vault_entries goes through it.
+# whoami and signout stay outside require_permission: the client needs to know who it
+# is (and be able to leave) regardless of role or freshness. Everything below that
+# reads or writes vault_entries goes through the guard.
 
 
 @router.get("/whoami", response_model=WhoAmIResponse)
 async def whoami(user: User = Depends(current_user)) -> WhoAmIResponse:
-    return WhoAmIResponse(username=user.username)
+    return WhoAmIResponse(username=user.username, role=user.role)
 
 
 @router.post("/signout")
@@ -33,7 +33,7 @@ async def signout(
 
 @router.get("", response_model=list[VaultEntryOut])
 async def list_entries(
-    principal: Principal = Depends(require_fresh_verification("vault:list")),
+    principal: Principal = Depends(require_permission("vault:list")),
     db: AsyncSession = Depends(get_session),
 ) -> list[VaultEntryOut]:
     rows = (
@@ -59,7 +59,7 @@ async def list_entries(
 @router.post("", response_model=VaultEntryOut, status_code=status.HTTP_201_CREATED)
 async def create_entry(
     body: VaultEntryCreate,
-    principal: Principal = Depends(require_fresh_verification("vault:create")),
+    principal: Principal = Depends(require_permission("vault:create")),
     db: AsyncSession = Depends(get_session),
 ) -> VaultEntryOut:
     ciphertext, nonce = encrypt(body.password)
@@ -85,7 +85,7 @@ async def create_entry(
 @router.delete("/{entry_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_entry(
     entry_id: str,
-    principal: Principal = Depends(require_fresh_verification("vault:delete")),
+    principal: Principal = Depends(require_permission("vault:delete")),
     db: AsyncSession = Depends(get_session),
 ) -> Response:
     row = (

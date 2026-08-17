@@ -48,7 +48,7 @@ Tests:
 cd backend && pytest
 ```
 
-The smoke tests don't drive the WebAuthn ceremony itself — there's no real authenticator inside pytest. They insert a user + session row directly and exercise the vault CRUD and signout paths, which is the part I actually wrote. The step-up tests work the same way: seeding a session with a backdated `last_verified_at` is enough to make the guard deny, so I can assert on the 403 *and* on the `access_log` row without a fingerprint anywhere.
+The smoke tests don't drive the WebAuthn ceremony itself — there's no real authenticator inside pytest. They insert a user + session row directly and exercise the vault CRUD and signout paths, which is the part I actually wrote. The authorization tests work the same way: seeding a user with `role="viewer"`, or a session with a backdated `last_verified_at`, is enough to make the guard deny — so I can assert on the 403 *and* on the `audit_log` row without a fingerprint anywhere.
 
 ## How the pieces fit
 
@@ -61,15 +61,22 @@ Registration and login each have a `/begin` and `/complete` endpoint. `/begin` g
 
 The vault is plain CRUD with one wrinkle: `POST /api/vault` AES-GCM-encrypts the password before saving, `GET /api/vault` decrypts on the way out. The key lives in the `VAULT_KEY` env var on the server. That's a deliberate shortcut — see below.
 
-### Signed in ≠ verified
+### Signed in ≠ allowed
 
-The session cookie lasts 24 hours, which is fine for knowing *who* you are and terrible as permission to read every password you own. So the routes that touch `vault_entries` want a second thing: a passkey assertion from within the last `STEP_UP_TTL_SECONDS` (5 minutes by default). Sessions carry a `last_verified_at` alongside `expires_at`, and `app/authz.py` compares them.
+Being signed in is one question. Whether you may do a particular thing is two more, and `app/authz.py` asks both before any route touches `vault_entries`:
 
-Allowed → the request reaches the vault route and touches `vault_entries`. Denied → 403 with `{"code": "reverification_required"}`, and the frontend swaps the entry list for an *Unlock with passkey* button. That runs `/api/webauthn/reverify/{begin,complete}`, which is an ordinary assertion except it refreshes the existing session instead of minting a new one — same cookie, same row, new clock.
+1. **Does your role grant the action?** Two roles. `owner` may list, create, and delete; `viewer` may only list. That's a `role` column on `users` and a dict in code, not a permissions table — with two roles and three actions, a table would be ceremony.
+2. **Is your passkey assertion recent enough?** The session cookie lasts 24 hours, which is fine for knowing *who* you are and terrible as standing permission to read every password you own. Sessions carry `last_verified_at` alongside `expires_at`, and the vault wants one from the last `STEP_UP_TTL_SECONDS` (5 minutes by default).
 
-The part I care about is that deciding and recording are the same code path. The guard writes an `access_log` row — allow *and* deny, with the action, the decision, and how stale the session was — before it either returns or raises. There's no separate "oh and log the failure too" branch sitting next to the `raise`, because that's exactly the branch that rots the first time someone adds a route and forgets it.
+`require_permission("vault:delete")` composes with the existing cookie check rather than replacing it — it depends on the same `current_principal`, so the session still resolves and still 401s on its own terms, and the role check sits on top. Routes swapped one dependency; the auth flow didn't change.
 
-There's no migration tool here, so `init_db()` does a small additive-column pass after `create_all()`. `last_verified_at` has no default on purpose: a session row that predates the column reads `NULL`, and `NULL` means denied rather than fresh. Fail closed. (I had this backwards at first — the model default was quietly making never-verified sessions look brand new, and a test caught it.)
+Permission is checked first, deliberately. A viewer can't delete however fresh their assertion is, so answering "re-verify with your passkey" would be a lie. Two codes come back so the client can tell them apart: `permission_denied` (don't offer a retry) and `reverification_required` (do — the frontend swaps the entry list for an *Unlock with passkey* button, which runs `/api/webauthn/reverify/{begin,complete}`: an ordinary assertion that refreshes the existing session instead of minting a new one, same cookie, same row, new clock).
+
+The part I care about is that deciding and recording are the same code path. The guard writes an `audit_log` row — allow *and* deny, with the role as it was at decision time, the action, the result, the reason, and how stale the session was — before it either returns or raises. There's no separate "oh and log the failure too" branch sitting next to the `raise`, because that's exactly the branch that rots the first time someone adds a route and forgets it.
+
+There's no migration tool here, so `init_db()` does a small additive-column pass after `create_all()`. It handles a new column only when existing rows can be given a value — nullable, or carrying a `server_default`. `role` has `server_default="owner"`, so accounts that predate it keep working. `last_verified_at` deliberately has neither, so a session that never completed a ceremony reads `NULL` and is denied rather than treated as fresh. Fail closed. (I had that backwards at first — the model default was quietly making never-verified sessions look brand new, and a test caught it.)
+
+What this doesn't do: roles are assigned in the database by hand, since there's no admin UI and no invite flow. `audit_log` has no retention policy and grows one row per vault request. It's append-only by convention, not enforcement — no hash chaining, nothing that would survive someone with write access to the database. And it covers authorization decisions on the vault routes only, not logins, registrations, or session lifecycle.
 
 ## What I cut
 

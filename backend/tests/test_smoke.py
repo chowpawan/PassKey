@@ -20,18 +20,22 @@ from app.models import Session as SessionRow
 from app.models import User
 
 
-async def _seed_user_and_session(verified_ago_seconds: int = 0) -> tuple[str, str]:
+async def _seed_user_and_session(
+    verified_ago_seconds: int = 0, role: str = "owner"
+) -> tuple[str, str]:
     """Create a user + valid session row; return (username, cookie_token).
 
-    `verified_ago_seconds` backdates the last passkey assertion so the step-up guard
-    in app.authz can be exercised without a real authenticator. Pass None to model a
-    session row written before last_verified_at existed.
+    Same pattern as the rest of the suite: insert the rows a completed ceremony would
+    have produced, rather than driving an authenticator pytest doesn't have.
+    `verified_ago_seconds` backdates the last passkey assertion to exercise the
+    step-up branch; pass None to model a session row written before the column
+    existed. `role` picks which permission set the guard will evaluate.
     """
     from datetime import datetime, timedelta, timezone
 
     now = datetime.now(timezone.utc)
     async with SessionLocal() as db:
-        user = User(username="smoketest")
+        user = User(username="smoketest", role=role)
         db.add(user)
         await db.commit()
         await db.refresh(user)
@@ -52,17 +56,17 @@ async def _seed_user_and_session(verified_ago_seconds: int = 0) -> tuple[str, st
     return user.username, token
 
 
-async def _access_log() -> list[tuple[str, str, str | None]]:
-    """Every recorded decision, oldest first, as (action, decision, reason)."""
+async def _audit_log() -> list[tuple[str, str, str, str | None]]:
+    """Every recorded decision, oldest first, as (role, action, result, reason)."""
     from sqlalchemy import select
 
-    from app.models import AccessLog
+    from app.models import AuditLog
 
     async with SessionLocal() as db:
         rows = (
-            await db.execute(select(AccessLog).order_by(AccessLog.created_at))
+            await db.execute(select(AuditLog).order_by(AuditLog.created_at))
         ).scalars().all()
-    return [(r.action, r.decision, r.reason) for r in rows]
+    return [(r.role, r.action, r.result, r.reason) for r in rows]
 
 
 @pytest.fixture(autouse=True)
@@ -72,10 +76,10 @@ async def _db():
     # Wipe between tests
     from sqlalchemy import delete
 
-    from app.models import AccessLog, Challenge, Credential, VaultEntry
+    from app.models import AuditLog, Challenge, Credential, VaultEntry
 
     async with SessionLocal() as db:
-        for table in (AccessLog, VaultEntry, Credential, Challenge, SessionRow, User):
+        for table in (AuditLog, VaultEntry, Credential, Challenge, SessionRow, User):
             await db.execute(delete(table))
         await db.commit()
 
@@ -153,7 +157,7 @@ async def test_fresh_session_is_allowed_and_recorded():
         assert res.status_code == 200
 
     # Allows are recorded too, not just denials.
-    assert await _access_log() == [("vault:list", "allow", None)]
+    assert await _audit_log() == [("owner", "vault:list", "allow", None)]
 
 
 async def test_stale_session_gets_403_with_reverification_code():
@@ -168,7 +172,7 @@ async def test_stale_session_gets_403_with_reverification_code():
 
 
 async def test_denial_is_recorded_without_a_separate_logging_call():
-    """The 403 and its access_log row come from the same code path in the guard."""
+    """The 403 and its audit_log row come from the same code path in the guard."""
     _, token = await _seed_user_and_session(verified_ago_seconds=STALE)
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test", cookies={COOKIE_NAME: token}
@@ -176,9 +180,9 @@ async def test_denial_is_recorded_without_a_separate_logging_call():
         assert (await client.get("/api/vault")).status_code == 403
         assert (await client.delete("/api/vault/does-not-matter")).status_code == 403
 
-    assert await _access_log() == [
-        ("vault:list", "deny", "stale_verification"),
-        ("vault:delete", "deny", "stale_verification"),
+    assert await _audit_log() == [
+        ("owner", "vault:list", "deny", "stale_verification"),
+        ("owner", "vault:delete", "deny", "stale_verification"),
     ]
 
 
@@ -211,7 +215,7 @@ async def test_session_predating_the_column_is_denied():
         res = await client.get("/api/vault")
 
     assert res.status_code == 403
-    assert await _access_log() == [("vault:list", "deny", "stale_verification")]
+    assert await _audit_log() == [("owner", "vault:list", "deny", "stale_verification")]
 
 
 async def test_whoami_and_signout_are_not_step_up_gated():
@@ -226,14 +230,14 @@ async def test_whoami_and_signout_are_not_step_up_gated():
 
         assert (await client.post("/api/vault/signout")).status_code == 200
 
-    assert await _access_log() == []
+    assert await _audit_log() == []
 
 
 async def test_unauthenticated_request_is_401_and_logs_nothing():
     """No session means no principal to attribute a decision to — 401 before the guard."""
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         assert (await client.get("/api/vault")).status_code == 401
-    assert await _access_log() == []
+    assert await _audit_log() == []
 
 
 async def test_marking_verified_unlocks_the_same_session():
@@ -256,12 +260,102 @@ async def test_marking_verified_unlocks_the_same_session():
         # Same cookie, same session row — no re-login required.
         assert (await client.get("/api/vault")).status_code == 200
 
-    assert await _access_log() == [
-        ("vault:list", "deny", "stale_verification"),
-        ("vault:list", "allow", None),
+    assert await _audit_log() == [
+        ("owner", "vault:list", "deny", "stale_verification"),
+        ("owner", "vault:list", "allow", None),
     ]
 
 
 async def test_reverify_begin_requires_a_session():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         assert (await client.post("/api/webauthn/reverify/begin")).status_code == 401
+
+
+# --- Role-based permissions (app.authz) -----------------------------------------------
+
+
+async def test_viewer_may_read():
+    _, token = await _seed_user_and_session(role="viewer")
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test", cookies={COOKIE_NAME: token}
+    ) as client:
+        assert (await client.get("/api/vault")).status_code == 200
+
+    assert await _audit_log() == [("viewer", "vault:list", "allow", None)]
+
+
+async def test_viewer_deleting_gets_403_and_an_audit_row():
+    _, token = await _seed_user_and_session(role="viewer")
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test", cookies={COOKIE_NAME: token}
+    ) as client:
+        res = await client.delete("/api/vault/any-id")
+
+    assert res.status_code == 403
+    assert res.json()["detail"]["code"] == "permission_denied"
+    assert await _audit_log() == [("viewer", "vault:delete", "deny", "missing_permission")]
+
+
+async def test_viewer_creating_gets_403_and_writes_nothing():
+    from sqlalchemy import func, select
+
+    from app.models import VaultEntry
+
+    _, token = await _seed_user_and_session(role="viewer")
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test", cookies={COOKIE_NAME: token}
+    ) as client:
+        res = await client.post(
+            "/api/vault",
+            json={"label": "github.com", "username": "alice", "password": "hunter2"},
+        )
+        assert res.status_code == 403
+
+    async with SessionLocal() as db:
+        count = (await db.execute(select(func.count()).select_from(VaultEntry))).scalar_one()
+    assert count == 0
+    assert await _audit_log() == [("viewer", "vault:create", "deny", "missing_permission")]
+
+
+async def test_permission_is_checked_before_freshness():
+    """A viewer can't delete however fresh they are, so re-verifying is the wrong advice."""
+    _, token = await _seed_user_and_session(verified_ago_seconds=STALE, role="viewer")
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test", cookies={COOKIE_NAME: token}
+    ) as client:
+        res = await client.delete("/api/vault/any-id")
+
+    assert res.json()["detail"]["code"] == "permission_denied"
+    assert await _audit_log() == [("viewer", "vault:delete", "deny", "missing_permission")]
+
+
+async def test_unknown_role_grants_nothing():
+    """Roles are an allowlist: a value the permission map doesn't know is denied."""
+    _, token = await _seed_user_and_session(role="wat")
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test", cookies={COOKIE_NAME: token}
+    ) as client:
+        assert (await client.get("/api/vault")).status_code == 403
+
+    assert await _audit_log() == [("wat", "vault:list", "deny", "missing_permission")]
+
+
+async def test_users_default_to_owner():
+    """Nothing breaks for accounts that existed before the column did."""
+    async with SessionLocal() as db:
+        user = User(username="no-role-given")
+        db.add(user)
+        await db.commit()
+        await db.refresh(user)
+        assert user.role == "owner"
+
+
+async def test_whoami_reports_the_role():
+    _, token = await _seed_user_and_session(role="viewer")
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test", cookies={COOKIE_NAME: token}
+    ) as client:
+        res = await client.get("/api/vault/whoami")
+
+    assert res.status_code == 200
+    assert res.json()["role"] == "viewer"

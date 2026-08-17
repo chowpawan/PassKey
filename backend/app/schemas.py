@@ -31,6 +31,9 @@ class ReverifyCompleteRequest(BaseModel):
 
 class WhoAmIResponse(BaseModel):
     username: str
+    # So the UI can hide controls the role can't use. The guard is still the authority —
+    # this only keeps the client from offering an action it knows will 403.
+    role: str
 
 
 class VaultEntryCreate(BaseModel):
