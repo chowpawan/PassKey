@@ -7,6 +7,12 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db import Base
 
 
+#: Roles. Defined here rather than in authz so models can reference the default
+#: without importing the permission map (which imports models).
+OWNER = "owner"
+VIEWER = "viewer"
+
+
 def _uuid() -> str:
     return str(uuid.uuid4())
 
@@ -20,6 +26,12 @@ class User(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    # Two fixed roles, so a column and a permission map in code beat a roles table.
+    # server_default matters as much as default: it's what backfills rows that already
+    # existed when this column was added, so nobody loses access on upgrade.
+    role: Mapped[str] = mapped_column(
+        String(16), nullable=False, default=OWNER, server_default=OWNER
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     credentials: Mapped[list["Credential"]] = relationship(back_populates="user", cascade="all, delete-orphan")
@@ -82,24 +94,28 @@ class Session(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
-class AccessLog(Base):
+class AuditLog(Base):
     """One row per authorization decision on a vault route — allow *and* deny.
 
-    Written by the guard itself (app.authz), before it either lets the route run or
-    raises 403, so a denial can't reach the client without a matching row here.
+    Insert-only: nothing in the app updates or deletes these rows. Written by the
+    guard itself (app.authz), before it either lets the route run or raises 403, so
+    a denial can't reach the client without a matching row here.
     """
 
-    __tablename__ = "access_log"
+    __tablename__ = "audit_log"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     # Plain column, not an FK: signing out deletes the session row, and the trail of
     # what that session did should outlive it.
     session_id: Mapped[str] = mapped_column(String(36), index=True)
+    # The role as it was at decision time. Roles can change; the trail shouldn't
+    # silently rewrite itself when they do.
+    role: Mapped[str] = mapped_column(String(16))
     action: Mapped[str] = mapped_column(String(32))  # 'vault:list' | 'vault:create' | 'vault:delete'
     method: Mapped[str] = mapped_column(String(8))
     path: Mapped[str] = mapped_column(String(255))
-    decision: Mapped[str] = mapped_column(String(8))  # 'allow' | 'deny'
+    result: Mapped[str] = mapped_column(String(8))  # 'allow' | 'deny'
     reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
     verified_age_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)

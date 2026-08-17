@@ -1,11 +1,15 @@
 import { useEffect, useRef, useState } from "react";
-import { api, needsReverification, type VaultEntry } from "../api";
+import { api, needsReverification, type Role, type VaultEntry } from "../api";
 import { reverifyPasskey } from "../webauthn";
 import VaultEntryForm from "../components/VaultEntryForm";
 
-type Props = { username: string; onSignout: () => void };
+type Props = { username: string; role: Role | null; onSignout: () => void };
 
-export default function Vault({ username, onSignout }: Props) {
+export default function Vault({ username, role, onSignout }: Props) {
+  // Only hide write controls once the role is known to be read-only. Optimistic while
+  // it's still null; require_permission is the actual gate either way.
+  const canWrite = role !== "viewer";
+
   const [entries, setEntries] = useState<VaultEntry[]>([]);
   const [revealed, setRevealed] = useState<Record<string, boolean>>({});
   const [error, setError] = useState<string | null>(null);
@@ -102,7 +106,10 @@ export default function Vault({ username, onSignout }: Props) {
       <div className="nav">
         <div>
           <h1 style={{ margin: 0 }}>Vault</h1>
-          <div className="muted">Signed in as <strong>{username}</strong></div>
+          <div className="muted">
+            Signed in as <strong>{username}</strong>
+            {role && <> · {role}{role === "viewer" && " (read-only)"}</>}
+          </div>
         </div>
         <button className="secondary" onClick={onSignout}>Sign out</button>
       </div>
@@ -149,13 +156,15 @@ export default function Vault({ username, onSignout }: Props) {
               </button>
             </div>
           </div>
-          <button className="secondary" onClick={() => onDelete(entry.id)}>
-            Delete
-          </button>
+          {canWrite && (
+            <button className="secondary" onClick={() => onDelete(entry.id)}>
+              Delete
+            </button>
+          )}
         </div>
       ))}
 
-      <VaultEntryForm onCreate={onCreate} />
+      {canWrite && <VaultEntryForm onCreate={onCreate} />}
     </div>
   );
 }

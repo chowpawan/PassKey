@@ -35,13 +35,16 @@ async def get_session() -> AsyncIterator[AsyncSession]:
 
 
 def _add_missing_columns(sync_conn) -> None:
-    """Add nullable columns that exist on the models but not yet in the database.
+    """Add columns that exist on the models but not yet in the database.
 
     There's no migration tool here, and create_all() only creates whole missing
     tables — it never alters an existing one. Without this, adding a column to a
-    model breaks every database created before that column existed. Only nullable
-    columns are handled: a NOT NULL column can't be added to a populated table
-    without a default, and that case deserves a real migration.
+    model breaks every database created before that column existed.
+
+    A column is only safe to add in place if existing rows can be given a value:
+    either it's nullable, or it carries a server_default the database can backfill
+    with. A NOT NULL column with neither would fail against a populated table, and
+    that case deserves a real migration rather than a guess here.
     """
     from sqlalchemy import inspect as sa_inspect
     from sqlalchemy.schema import CreateColumn
@@ -54,7 +57,9 @@ def _add_missing_columns(sync_conn) -> None:
             continue  # create_all already built it with every column
         present = {col["name"] for col in inspector.get_columns(table.name)}
         for column in table.columns:
-            if column.name in present or not column.nullable:
+            if column.name in present:
+                continue
+            if not column.nullable and column.server_default is None:
                 continue
             ddl = CreateColumn(column).compile(dialect=sync_conn.dialect)
             sync_conn.exec_driver_sql(f'ALTER TABLE "{table.name}" ADD COLUMN {ddl}')

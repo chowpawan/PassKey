@@ -49,6 +49,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json();
 }
 
+export type Role = "owner" | "viewer";
+
+export type Me = {
+  username: string;
+  /** Mirrors app/authz.py PERMISSIONS. Used only to hide controls — the guard decides. */
+  role: Role;
+};
+
 export type VaultEntry = {
   id: string;
   label: string;
@@ -85,7 +93,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ assertion }),
     }),
-  whoami: () => request<{ username: string }>("/api/vault/whoami"),
+  whoami: () => request<Me>("/api/vault/whoami"),
   signout: () => request<{ ok: boolean }>("/api/vault/signout", { method: "POST" }),
   listVault: () => request<VaultEntry[]>("/api/vault"),
   createVault: (entry: { label: string; username: string; password: string }) =>
