@@ -2,13 +2,18 @@ from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import COOKIE_NAME, current_user, destroy_session
+from app.auth import COOKIE_NAME, Principal, current_user, destroy_session
+from app.authz import require_fresh_verification
 from app.crypto import decrypt, encrypt
 from app.db import get_session
 from app.models import User, VaultEntry
 from app.schemas import VaultEntryCreate, VaultEntryOut, WhoAmIResponse
 
 router = APIRouter()
+
+# whoami and signout stay outside the step-up guard: the client needs to know who it
+# is (and be able to leave) without first proving freshness. Everything below that
+# reads or writes vault_entries goes through it.
 
 
 @router.get("/whoami", response_model=WhoAmIResponse)
@@ -28,12 +33,14 @@ async def signout(
 
 @router.get("", response_model=list[VaultEntryOut])
 async def list_entries(
-    user: User = Depends(current_user),
+    principal: Principal = Depends(require_fresh_verification("vault:list")),
     db: AsyncSession = Depends(get_session),
 ) -> list[VaultEntryOut]:
     rows = (
         await db.execute(
-            select(VaultEntry).where(VaultEntry.user_id == user.id).order_by(VaultEntry.created_at.desc())
+            select(VaultEntry)
+            .where(VaultEntry.user_id == principal.user.id)
+            .order_by(VaultEntry.created_at.desc())
         )
     ).scalars().all()
 
@@ -52,12 +59,12 @@ async def list_entries(
 @router.post("", response_model=VaultEntryOut, status_code=status.HTTP_201_CREATED)
 async def create_entry(
     body: VaultEntryCreate,
-    user: User = Depends(current_user),
+    principal: Principal = Depends(require_fresh_verification("vault:create")),
     db: AsyncSession = Depends(get_session),
 ) -> VaultEntryOut:
     ciphertext, nonce = encrypt(body.password)
     row = VaultEntry(
-        user_id=user.id,
+        user_id=principal.user.id,
         label=body.label,
         username=body.username,
         ciphertext=ciphertext,
@@ -78,12 +85,14 @@ async def create_entry(
 @router.delete("/{entry_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_entry(
     entry_id: str,
-    user: User = Depends(current_user),
+    principal: Principal = Depends(require_fresh_verification("vault:delete")),
     db: AsyncSession = Depends(get_session),
 ) -> Response:
     row = (
         await db.execute(
-            select(VaultEntry).where(VaultEntry.id == entry_id, VaultEntry.user_id == user.id)
+            select(VaultEntry).where(
+                VaultEntry.id == entry_id, VaultEntry.user_id == principal.user.id
+            )
         )
     ).scalar_one_or_none()
     if row is None:

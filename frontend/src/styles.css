@@ -83,6 +83,26 @@ button.secondary {
   font-size: 0.9rem;
 }
 
+.notice {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  background: #fff8e1;
+  border: 1px solid #f0dca0;
+  padding: 0.9rem 1rem;
+  border-radius: 8px;
+  margin-bottom: 1rem;
+}
+
+.notice .muted {
+  margin-top: 0.15rem;
+}
+
+.notice button {
+  flex-shrink: 0;
+}
+
 .entry {
   border: 1px solid #eee;
   padding: 1rem;

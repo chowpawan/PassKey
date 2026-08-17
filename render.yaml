@@ -32,6 +32,10 @@ services:
       - key: SESSION_SECRET
         generateValue: true
 
+      # How recent a passkey assertion must be to touch the vault (see app/authz.py).
+      - key: STEP_UP_TTL_SECONDS
+        value: "300"
+
       # Production cookie flags for cross-origin frontend.
       - key: SECURE_COOKIES
         value: "true"
